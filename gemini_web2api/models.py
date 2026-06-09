@@ -1,5 +1,7 @@
 """Model definitions and mapping from Gemini frontend JS source."""
 
+from .logging import log
+
 # MODE_CATEGORY enum from 028-6eb337387583.js:
 #   1=FAST, 2=THINKING, 3=PRO, 4=AUTO, 5=FAST_DYNAMIC_THINKING, 6=FLASH_LITE
 
@@ -50,7 +52,6 @@ def resolve_model(model_name: str, default: str = "gemini-3.5-flash"):
             return None, None, None, f"Invalid think level: {think_str}", None
     cfg = MODELS.get(model_name)
     if not cfg:
-        from .gemini import log
         log(f"Unknown model '{model_name}', falling back to '{default}'")
         model_name = default
         cfg = MODELS[default]

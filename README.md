@@ -24,7 +24,7 @@ Convert Google Gemini's web interface into an OpenAI-compatible API. Zero cost, 
 ## Quick Start
 
 ```bash
-pip install httpx
+pip install -r requirements.txt
 python gemini_web2api.py
 ```
 
@@ -37,7 +37,7 @@ Server starts at `http://localhost:8081/v1`.
 | Field | Value |
 |-------|-------|
 | Base URL | `http://localhost:8081/v1` |
-| API Key | any `api_keys` value from `config.json`; anything if not configured |
+| API Key | leave empty or use any placeholder when `api_keys` is `[]`; otherwise use a configured local proxy key |
 | Model | `gemini-3.5-flash-thinking` |
 
 ### curl
@@ -45,7 +45,6 @@ Server starts at `http://localhost:8081/v1`.
 ```bash
 curl http://localhost:8081/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer sk-your-key" \
   -d '{"model":"gemini-3.5-flash","messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
@@ -53,12 +52,53 @@ curl http://localhost:8081/v1/chat/completions \
 
 ```python
 from openai import OpenAI
-client = OpenAI(base_url="http://localhost:8081/v1", api_key="sk-your-key")
+client = OpenAI(base_url="http://localhost:8081/v1", api_key="not-needed-when-api-keys-empty")
 resp = client.chat.completions.create(
     model="gemini-3.5-flash-thinking",
     messages=[{"role": "user", "content": "Explain quantum computing"}]
 )
 print(resp.choices[0].message.content)
+```
+
+### Codex CLI
+
+The Codex CLI uses the Responses API (`/v1/responses`). For cookie-file account
+round-robin, keep `"api_keys": []` in `config.json`; Gemini authentication then comes
+from the configured account cookies, not from a Bearer key.
+
+Add a provider like this to `~/.codex/config.toml`:
+
+```toml
+model_provider = "gemini-web2api"
+model = "gemini-3.5-flash"
+
+[model_providers.gemini-web2api]
+name = "gemini-web2api"
+base_url = "http://localhost:8081/v1"
+wire_api = "responses"
+```
+
+Start the server and Codex:
+
+```bash
+python gemini_web2api.py
+codex
+```
+
+If you intentionally want to protect the local proxy with `api_keys`, add `env_key` to
+the provider and export a matching value before starting Codex:
+
+```toml
+[model_providers.gemini-web2api]
+name = "gemini-web2api"
+base_url = "http://localhost:8081/v1"
+wire_api = "responses"
+env_key = "GEMINI_WEB2API_API_KEY"
+```
+
+```bash
+export GEMINI_WEB2API_API_KEY=sk-your-local-proxy-key
+codex
 ```
 
 ### Gemini CLI
@@ -165,9 +205,36 @@ Create `config.json` in the same directory:
   "accounts": [],
   "cookie_file": null,
   "proxy": null,
-  "log_requests": true
+  "log_requests": true,
+  "log_level": "INFO",
+  "log_file": "logs/gemini-web2api.log",
+  "log_rotation": "20 MB",
+  "log_retention": "7 days",
+  "log_compression": null,
+  "log_json": false
 }
 ```
+
+### Logging and monitoring
+
+Logging uses Loguru. Console logs are colorized, and `log_file` enables a rotating file
+sink for local monitoring. Set `log_level` to `DEBUG` when tracing account rotation or
+upstream failures. Set `log_json` to `true` for newline-delimited structured logs that
+can be ingested by external collectors.
+
+```json
+{
+  "log_requests": true,
+  "log_level": "INFO",
+  "log_file": "logs/gemini-web2api.log",
+  "log_rotation": "20 MB",
+  "log_retention": "7 days",
+  "log_compression": "zip",
+  "log_json": false
+}
+```
+
+Set `"log_requests": false` to disable application request logs.
 
 ### Multiple account rotation (round-robin)
 

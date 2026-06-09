@@ -4,5 +4,6 @@ config.json
 cookie.txt
 cookie.json
 .env
+logs/
 .idea
 .DS_Store

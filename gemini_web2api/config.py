@@ -18,6 +18,12 @@ DEFAULT_CONFIG = {
     "accounts": [],
     "proxy": None,
     "api_keys": [],
+    "log_level": "INFO",
+    "log_file": None,
+    "log_rotation": "20 MB",
+    "log_retention": "7 days",
+    "log_compression": None,
+    "log_json": False,
 }
 
 CONFIG = dict(DEFAULT_CONFIG)

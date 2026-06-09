@@ -9,7 +9,8 @@ import re
 import threading
 
 from .config import CONFIG
-from .gemini import load_cookie, make_sapisidhash, _get_ssl_ctx, log
+from .gemini import load_cookie, make_sapisidhash, _get_ssl_ctx
+from .logging import log
 
 
 def _get_page_tokens(account: dict = None) -> dict:

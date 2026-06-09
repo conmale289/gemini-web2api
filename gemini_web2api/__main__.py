@@ -5,8 +5,17 @@ import os
 from .config import CONFIG, load_config, find_config
 from .models import MODELS
 from .gemini import HAS_HTTPX
+from .logging import configure_logging, log
 from .server import GeminiHandler, ThreadedServer
 from . import __version__
+
+def _cookie_status():
+    accounts = CONFIG.get("accounts") or []
+    if any(a.get("cookie") or a.get("cookie_file") for a in accounts if isinstance(a, dict)):
+        return "yes (accounts)"
+    if CONFIG.get("cookie_file"):
+        return "yes"
+    return "none (anonymous)"
 
 
 def main():
@@ -29,17 +38,29 @@ def main():
     if args.proxy:
         CONFIG["proxy"] = args.proxy
 
+    configure_logging(CONFIG)
+
     port = CONFIG["port"]
     server = ThreadedServer((CONFIG["host"], port), GeminiHandler)
     print(f"gemini-web2api v{__version__}")
     print(f"  Listening: http://0.0.0.0:{port}")
     print(f"  Base URL:  http://localhost:{port}/v1")
     print(f"  Models:    {', '.join(MODELS.keys())}")
-    print(f"  Cookie:    {'yes' if CONFIG.get('cookie_file') else 'none (anonymous)'}")
+    print(f"  Cookie:    {_cookie_status()}")
     print(f"  Accounts:  {len(CONFIG.get('accounts') or []) or 'legacy/single'}")
     print(f"  Proxy:     {CONFIG.get('proxy') or 'system env'}")
     print(f"  Streaming: {'httpx (true streaming)' if HAS_HTTPX else 'urllib (buffered)'}")
     print()
+    log(
+        "Server started: host={} port={} accounts={} cookie={} proxy={} streaming={}".format(
+            CONFIG["host"],
+            port,
+            len(CONFIG.get("accounts") or []) or "legacy/single",
+            _cookie_status(),
+            CONFIG.get("proxy") or "system env",
+            "httpx" if HAS_HTTPX else "urllib",
+        )
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

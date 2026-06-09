@@ -17,18 +17,11 @@ except ImportError:
 
 from .config import CONFIG
 from .account_pool import AccountPool, mask_account_id
+from .logging import log
 
 _ssl_ctx = None
 _httpx_client = None
 ACCOUNT_POOL = AccountPool(CONFIG)
-
-
-def log(msg: str):
-    if CONFIG["log_requests"]:
-        import sys
-        sys.stderr.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
-        sys.stderr.flush()
-
 
 def _get_ssl_ctx():
     global _ssl_ctx
