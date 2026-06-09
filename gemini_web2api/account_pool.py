@@ -148,6 +148,7 @@ class AccountPool:
         with self._lock:
             state = self._state.setdefault(account["id"], {"failures": 0, "backoff_until": 0})
             state["failures"] += 1
-            backoff = min(60, 2 ** (state["failures"] - 1))
+            exponent = min(state["failures"] - 1, 6)
+            backoff = min(60, 2 ** exponent)
             state["backoff_until"] = time.time() + backoff
             return backoff

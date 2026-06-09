@@ -156,7 +156,10 @@ def _is_account_error(err: Exception) -> bool:
 
 
 def _account_attempts(forced_account: dict = None) -> int:
-    base = max(1, int(CONFIG["retry_attempts"]))
+    try:
+        base = max(1, int(CONFIG["retry_attempts"]))
+    except (TypeError, ValueError):
+        base = 1
     if forced_account:
         return base
     attempts = base * max(1, ACCOUNT_POOL.enabled_account_count())

@@ -59,7 +59,7 @@ def _cached_page_tokens(account: dict = None) -> dict:
         if now - cache["ts"] > 600:
             cache["tokens"] = _get_page_tokens(account)
             cache["ts"] = now
-        return cache["tokens"]
+        return dict(cache["tokens"])
 
 
 def upload_image(image_bytes: bytes, filename: str = "image.png", mime_type: str = "image/png",
