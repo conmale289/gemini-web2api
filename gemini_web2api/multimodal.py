@@ -11,16 +11,23 @@ from .config import CONFIG
 from .gemini import load_cookie, make_sapisidhash, _get_ssl_ctx, log
 
 
-def _get_page_tokens() -> dict:
+def _get_page_tokens(account: dict = None) -> dict:
     """Fetch WIZ_global_data tokens from Gemini page (Push-ID, X-Client-Pctx)."""
+    account = account or {}
+    auth_user = account.get("auth_user")
+    account_prefix = f"/u/{auth_user}" if auth_user not in (None, "") else ""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     }
-    cookie_str, sapisid = load_cookie()
+    cookie_str, sapisid = load_cookie(account)
     if cookie_str:
         headers["Cookie"] = cookie_str
+    if sapisid:
+        headers["Authorization"] = make_sapisidhash(sapisid)
+    if account_prefix:
+        headers["X-Goog-AuthUser"] = str(auth_user)
     try:
-        req = urllib.request.Request("https://gemini.google.com/app", headers=headers)
+        req = urllib.request.Request(f"https://gemini.google.com{account_prefix}/app", headers=headers)
         resp = urllib.request.urlopen(req, context=_get_ssl_ctx(), timeout=30)
         html = resp.read().decode()
         tokens = {}
@@ -38,24 +45,29 @@ def _get_page_tokens() -> dict:
         return {}
 
 
-_page_tokens_cache = {"tokens": {}, "ts": 0}
+_page_tokens_cache = {}
 
 
-def _cached_page_tokens() -> dict:
+def _cached_page_tokens(account: dict = None) -> dict:
+    account = account or {}
+    account_id = account.get("id", "legacy")
     now = time.time()
-    if now - _page_tokens_cache["ts"] > 600:
-        _page_tokens_cache["tokens"] = _get_page_tokens()
-        _page_tokens_cache["ts"] = now
-    return _page_tokens_cache["tokens"]
+    cache = _page_tokens_cache.setdefault(account_id, {"tokens": {}, "ts": 0})
+    if now - cache["ts"] > 600:
+        cache["tokens"] = _get_page_tokens(account)
+        cache["ts"] = now
+    return cache["tokens"]
 
 
-def upload_image(image_bytes: bytes, filename: str = "image.png", mime_type: str = "image/png") -> str:
+def upload_image(image_bytes: bytes, filename: str = "image.png", mime_type: str = "image/png",
+                 account: dict = None) -> str:
     """Upload image via Scotty resumable upload. Returns file reference path."""
-    tokens = _cached_page_tokens()
+    account = account or {}
+    tokens = _cached_page_tokens(account)
     push_id = tokens.get("push_id", "feeds/mcudyrk2a4khkz")
     pctx = tokens.get("pctx", "CgcSBWjK7pYx")
 
-    cookie_str, sapisid = load_cookie()
+    cookie_str, sapisid = load_cookie(account)
     ctx = _get_ssl_ctx()
     proxy = CONFIG.get("proxy")
 

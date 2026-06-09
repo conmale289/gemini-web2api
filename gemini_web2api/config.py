@@ -14,6 +14,7 @@ DEFAULT_CONFIG = {
     "default_model": "gemini-3.5-flash",
     "log_requests": True,
     "cookie_file": None,
+    "accounts": [],
     "proxy": None,
     "api_keys": [],
 }

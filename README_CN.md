@@ -161,11 +161,27 @@ Pro 路由需要 **Gemini Advanced** (付费订阅). 免费 Google 账号的 coo
   "auth_user": null,
   "xsrf_token": null,
   "api_keys": ["sk-your-key"],
+  "accounts": [],
   "cookie_file": null,
   "proxy": null,
   "log_requests": true
 }
 ```
+
+### 多账号轮询 (round-robin)
+
+可配置多个 cookie 账号，服务会按 round-robin 轮询，并在账号级错误时临时回退到其他账号：
+
+```json
+{
+  "accounts": [
+    {"id": "acc1", "cookie_file": "/app/cookie1.txt", "auth_user": "0", "xsrf_token": "token1", "enabled": true, "weight": 1},
+    {"id": "acc2", "cookie_file": "/app/cookie2.txt", "auth_user": "1", "xsrf_token": "token2", "enabled": true, "weight": 2}
+  ]
+}
+```
+
+`accounts` 可选。若为空，仍兼容旧版单账号字段 (`cookie_file`, `auth_user`, `xsrf_token`)。
 
 `api_keys` 为空数组 `[]` 时不校验密钥；填入一个或多个密钥后, `/v1/*` 接口需要 `Authorization: Bearer <key>` 或 `x-api-key: <key>`.
 

@@ -11,6 +11,7 @@
   "api_keys": [
     "sk-gemini"
   ],
+  "accounts": [],
   "cookie_file": null,
   "proxy": null,
   "log_requests": true
