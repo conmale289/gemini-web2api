@@ -5,8 +5,8 @@ import uuid
 import re
 import urllib.request
 import urllib.parse
+import urllib.error
 import ssl
-import os
 import hashlib
 
 try:
@@ -16,10 +16,11 @@ except ImportError:
     HAS_HTTPX = False
 
 from .config import CONFIG
+from .account_pool import AccountPool, mask_account_id
 
 _ssl_ctx = None
-_cookie_cache = {"str": "", "sapisid": None, "mtime": 0}
 _httpx_client = None
+ACCOUNT_POOL = AccountPool(CONFIG)
 
 
 def log(msg: str):
@@ -45,30 +46,13 @@ def _get_httpx_client():
     return _httpx_client
 
 
-def load_cookie() -> tuple:
-    """Load cookie from file with mtime-based caching."""
-    cookie_file = CONFIG.get("cookie_file")
-    if not cookie_file or not os.path.exists(cookie_file):
-        return "", None
-    try:
-        mtime = os.path.getmtime(cookie_file)
-        if mtime == _cookie_cache["mtime"] and _cookie_cache["str"]:
-            return _cookie_cache["str"], _cookie_cache["sapisid"]
-        with open(cookie_file, "r") as f:
-            content = f.read().strip()
-        if content.startswith("{"):
-            data = json.loads(content)
-            cookie_str = data.get("cookie", "")
-            sapisid = data.get("sapisid", "")
-        else:
-            cookie_str = content
-            pairs = dict(p.split("=", 1) for p in cookie_str.split("; ") if "=" in p)
-            sapisid = pairs.get("SAPISID", "")
-        _cookie_cache.update({"str": cookie_str, "sapisid": sapisid or None, "mtime": mtime})
-        return cookie_str, sapisid if sapisid else None
-    except Exception as e:
-        log(f"Cookie load error: {e}")
-        return _cookie_cache["str"], _cookie_cache["sapisid"]
+def next_account() -> dict:
+    return ACCOUNT_POOL.next_account()
+
+
+def load_cookie(account: dict = None) -> tuple:
+    account = account or ACCOUNT_POOL.next_account()
+    return account.get("cookie", ""), account.get("sapisid")
 
 
 def make_sapisidhash(sapisid: str) -> str:
@@ -77,16 +61,18 @@ def make_sapisidhash(sapisid: str) -> str:
     return f"SAPISIDHASH {ts}_{h}"
 
 
-def _account_prefix() -> str:
+def _account_prefix(account: dict = None) -> str:
     """Return the Gemini account path prefix for non-default Google accounts."""
-    auth_user = CONFIG.get("auth_user")
+    auth_user = (account or {}).get("auth_user")
+    if auth_user is None:
+        auth_user = CONFIG.get("auth_user")
     if auth_user is None or auth_user == "":
         return ""
     return f"/u/{auth_user}"
 
 
-def _build_headers() -> dict:
-    account_prefix = _account_prefix()
+def _build_headers(account: dict = None) -> dict:
+    account_prefix = _account_prefix(account)
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
         "Origin": "https://gemini.google.com",
@@ -95,8 +81,11 @@ def _build_headers() -> dict:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     }
     if account_prefix:
-        headers["X-Goog-AuthUser"] = str(CONFIG["auth_user"])
-    cookie_str, sapisid = load_cookie()
+        auth_user = (account or {}).get("auth_user")
+        if auth_user is None:
+            auth_user = CONFIG.get("auth_user")
+        headers["X-Goog-AuthUser"] = str(auth_user)
+    cookie_str, sapisid = load_cookie(account)
     if cookie_str:
         headers["Cookie"] = cookie_str
     if sapisid:
@@ -104,7 +93,8 @@ def _build_headers() -> dict:
     return headers
 
 
-def _build_payload(prompt: str, model_id: int, think_mode: int, file_refs: list = None, extra_fields: dict = None) -> str:
+def _build_payload(prompt: str, model_id: int, think_mode: int, file_refs: list = None, extra_fields: dict = None,
+                   account: dict = None) -> str:
     inner = [None] * 102
     if file_refs:
         refs = [[None, None, ref] for ref in file_refs]
@@ -132,19 +122,51 @@ def _build_payload(prompt: str, model_id: int, think_mode: int, file_refs: list 
             inner[k] = v
     outer = [None, json.dumps(inner)]
     params = {"f.req": json.dumps(outer)}
-    if CONFIG.get("xsrf_token"):
-        params["at"] = CONFIG["xsrf_token"]
+    xsrf_token = (account or {}).get("xsrf_token")
+    if xsrf_token is None:
+        xsrf_token = CONFIG.get("xsrf_token")
+    if xsrf_token:
+        params["at"] = xsrf_token
     return urllib.parse.urlencode(params)
 
 
-def _get_url() -> str:
+def _get_url(account: dict = None) -> str:
     reqid = int(time.time()) % 1000000
-    account_prefix = _account_prefix()
+    account_prefix = _account_prefix(account)
     return (
         f"https://gemini.google.com{account_prefix}/_/BardChatUi/data/"
         "assistant.lamda.BardFrontendService/StreamGenerate"
         f"?bl={CONFIG['gemini_bl']}&hl=en&_reqid={reqid}&rt=c"
     )
+
+
+def _is_account_error(err: Exception) -> bool:
+    if isinstance(err, urllib.error.HTTPError):
+        if err.code in (400, 401, 403, 429):
+            return True
+        try:
+            body = err.read().decode("utf-8", errors="ignore").lower()
+            return any(k in body for k in ("xsrf", "auth", "unauthorized", "forbidden", "rate", "quota"))
+        except Exception:
+            return False
+    if HAS_HTTPX and isinstance(err, httpx.HTTPStatusError):
+        return err.response.status_code in (400, 401, 403, 429)
+    msg = str(err).lower()
+    return any(k in msg for k in ("xsrf", "auth", "unauthorized", "forbidden", "rate limit", "quota", "429"))
+
+
+def _account_attempts(forced_account: dict = None) -> int:
+    try:
+        base = max(1, int(CONFIG["retry_attempts"]))
+    except (TypeError, ValueError):
+        base = 1
+    if forced_account:
+        return base
+    attempts = base * max(1, ACCOUNT_POOL.enabled_account_count())
+    cap = CONFIG.get("max_account_retry_attempts")
+    if isinstance(cap, int) and cap > 0:
+        attempts = min(attempts, cap)
+    return max(base, attempts)
 
 
 def clean_text(text: str) -> str:
@@ -189,16 +211,19 @@ def extract_response_text(raw: str) -> str:
     return clean_text(last_text)
 
 
-def generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None, extra_fields: dict = None) -> str:
+def generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None, extra_fields: dict = None,
+             account: dict = None) -> str:
     """Non-streaming generation with retry."""
-    body = _build_payload(prompt, model_id, think_mode, file_refs, extra_fields).encode()
-    url = _get_url()
-    headers = _build_headers()
     ctx = _get_ssl_ctx()
     proxy = CONFIG.get("proxy")
 
     last_err = None
-    for attempt in range(CONFIG["retry_attempts"]):
+    max_attempts = _account_attempts(account)
+    for attempt in range(max_attempts):
+        account_ctx = account or ACCOUNT_POOL.next_account()
+        body = _build_payload(prompt, model_id, think_mode, file_refs, extra_fields, account_ctx).encode()
+        url = _get_url(account_ctx)
+        headers = _build_headers(account_ctx)
         try:
             req = urllib.request.Request(url, data=body, headers=headers, method="POST")
             if proxy:
@@ -210,33 +235,43 @@ def generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None
             else:
                 resp = urllib.request.urlopen(req, context=ctx, timeout=CONFIG["request_timeout_sec"])
             raw = resp.read().decode("utf-8", errors="replace")
+            ACCOUNT_POOL.report_success(account_ctx)
             return extract_response_text(raw)
         except Exception as e:
             last_err = e
-            if attempt < CONFIG["retry_attempts"] - 1:
-                log(f"Retry {attempt+1}/{CONFIG['retry_attempts']}: {e}")
+            if _is_account_error(e):
+                account_backoff_sec = ACCOUNT_POOL.report_failure(account_ctx)
+                if attempt < max_attempts - 1:
+                    log(f"Account rotate {attempt+1}/{max_attempts}: account={mask_account_id(account_ctx.get('id'))} "
+                        f"backoff={account_backoff_sec}s reason={e}")
+            elif attempt < max_attempts - 1:
+                log(f"Retry {attempt+1}/{max_attempts}: {e}")
                 time.sleep(CONFIG["retry_delay_sec"])
     raise last_err
 
 
-def generate_stream(prompt: str, model_id: int, think_mode: int, file_refs: list = None, extra_fields: dict = None):
+def generate_stream(prompt: str, model_id: int, think_mode: int, file_refs: list = None, extra_fields: dict = None,
+                    account: dict = None):
     """Streaming generation via httpx with retry on connection failure."""
     if not HAS_HTTPX:
-        text = generate(prompt, model_id, think_mode, file_refs, extra_fields)
+        text = generate(prompt, model_id, think_mode, file_refs, extra_fields, account=account)
         if text:
             yield text
         return
 
-    body = _build_payload(prompt, model_id, think_mode, file_refs, extra_fields)
-    url = _get_url()
-    headers = _build_headers()
     client = _get_httpx_client()
 
     last_err = None
-    for attempt in range(CONFIG["retry_attempts"]):
+    max_attempts = _account_attempts(account)
+    for attempt in range(max_attempts):
+        account_ctx = account or ACCOUNT_POOL.next_account()
+        body = _build_payload(prompt, model_id, think_mode, file_refs, extra_fields, account_ctx)
+        url = _get_url(account_ctx)
+        headers = _build_headers(account_ctx)
         try:
             prev_text = ""
             with client.stream("POST", url, content=body, headers=headers) as resp:
+                resp.raise_for_status()
                 buf = ""
                 for chunk in resp.iter_text():
                     buf += chunk
@@ -248,10 +283,16 @@ def generate_stream(prompt: str, model_id: int, think_mode: int, file_refs: list
                                 if delta:
                                     yield delta
                                 prev_text = t
+            ACCOUNT_POOL.report_success(account_ctx)
             return
         except Exception as e:
             last_err = e
-            if attempt < CONFIG["retry_attempts"] - 1:
-                log(f"Stream retry {attempt+1}/{CONFIG['retry_attempts']}: {e}")
+            if _is_account_error(e):
+                account_backoff_sec = ACCOUNT_POOL.report_failure(account_ctx)
+                if attempt < max_attempts - 1:
+                    log(f"Stream rotate {attempt+1}/{max_attempts}: account={mask_account_id(account_ctx.get('id'))} "
+                        f"backoff={account_backoff_sec}s reason={e}")
+            elif attempt < max_attempts - 1:
+                log(f"Stream retry {attempt+1}/{max_attempts}: {e}")
                 time.sleep(CONFIG["retry_delay_sec"])
     raise last_err

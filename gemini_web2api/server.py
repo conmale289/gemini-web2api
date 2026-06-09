@@ -8,7 +8,7 @@ from socketserver import ThreadingMixIn
 
 from .config import CONFIG
 from .models import MODELS, resolve_model
-from .gemini import generate, generate_stream, log
+from .gemini import generate, generate_stream, log, next_account
 from .tools import messages_to_prompt, parse_tool_calls, google_contents_to_prompt, parse_google_function_calls
 from .multimodal import upload_image, fetch_image_bytes
 from . import __version__
@@ -20,7 +20,7 @@ def _usage(prompt: str, text: str) -> dict:
     return {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c}
 
 
-def _upload_images(images: list) -> list:
+def _upload_images(images: list, account: dict = None) -> list:
     """Upload images and return list of file references. Returns None if no images."""
     if not images:
         return None
@@ -33,7 +33,7 @@ def _upload_images(images: list) -> list:
                     data = fetch_image_bytes(data)
                     mime = mime or "image/png"
                 if data:
-                    ref = upload_image(data, "image.png", mime or "image/png")
+                    ref = upload_image(data, "image.png", mime or "image/png", account=account)
                     file_refs.append(ref)
         except Exception as e:
             log(f"Image upload failed: {e}")
@@ -154,10 +154,12 @@ class GeminiHandler(BaseHTTPRequestHandler):
         stream = req.get("stream", False)
         cid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
 
+        account = next_account() if images else None
+        file_refs = _upload_images(images, account)
         if stream and (not tools or tool_choice == "none"):
             try:
                 self._start_sse()
-                for delta in generate_stream(prompt, model_id, think_mode, _upload_images(images), extra_fields):
+                for delta in generate_stream(prompt, model_id, think_mode, file_refs, extra_fields, account=account):
                     chunk = {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
                              "model": model_name, "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}]}
                     self.wfile.write(f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode())
@@ -172,7 +174,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            text = generate(prompt, model_id, think_mode, _upload_images(images), extra_fields)
+            text = generate(prompt, model_id, think_mode, file_refs, extra_fields, account=account)
         except Exception as e:
             self.send_json({"error": {"message": f"upstream error: {e}"}}, 502)
             return
@@ -262,8 +264,9 @@ class GeminiHandler(BaseHTTPRequestHandler):
             self.send_json({"error": {"message": "empty input"}}, 400)
             return
 
+        account = next_account() if images else None
         try:
-            text = generate(prompt, model_id, think_mode, _upload_images(images), extra_fields)
+            text = generate(prompt, model_id, think_mode, _upload_images(images, account), extra_fields, account=account)
         except Exception as e:
             self.send_json({"error": {"message": f"upstream error: {e}"}}, 502)
             return
@@ -330,14 +333,15 @@ class GeminiHandler(BaseHTTPRequestHandler):
             self.send_json({"error": {"message": "empty content"}}, 400)
             return
 
-        file_refs = _upload_images(images)
+        account = next_account() if images else None
+        file_refs = _upload_images(images, account)
         log(f"Google API: model={model_name} stream={stream} tools={has_tools} prompt_len={len(prompt)}")
 
         if stream and not has_tools:
             try:
                 self._start_sse()
                 full_text = ""
-                for delta in generate_stream(prompt, model_id, think_mode, file_refs, extra_fields):
+                for delta in generate_stream(prompt, model_id, think_mode, file_refs, extra_fields, account=account):
                     if not delta:
                         continue
                     full_text += delta
@@ -363,7 +367,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            text = generate(prompt, model_id, think_mode, file_refs, extra_fields)
+            text = generate(prompt, model_id, think_mode, file_refs, extra_fields, account=account)
         except Exception as e:
             self.send_json({"error": {"message": f"upstream error: {e}"}}, 502)
             return

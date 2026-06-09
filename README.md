@@ -155,17 +155,34 @@ Create `config.json` in the same directory:
   "port": 8081,
   "host": "0.0.0.0",
   "retry_attempts": 3,
+  "max_account_retry_attempts": 12,
   "retry_delay_sec": 2,
   "request_timeout_sec": 180,
   "gemini_bl": "boq_assistant-bard-web-server_20260525.09_p0",
   "auth_user": null,
   "xsrf_token": null,
   "api_keys": ["sk-your-key"],
+  "accounts": [],
   "cookie_file": null,
   "proxy": null,
   "log_requests": true
 }
 ```
+
+### Multiple account rotation (round-robin)
+
+You can configure multiple cookie accounts and the server will rotate by round-robin with temporary backoff on account-specific failures:
+
+```json
+{
+  "accounts": [
+    {"id": "acc1", "cookie_file": "/app/cookie1.txt", "auth_user": "0", "xsrf_token": "token1", "enabled": true, "weight": 1},
+    {"id": "acc2", "cookie_file": "/app/cookie2.txt", "auth_user": "1", "xsrf_token": "token2", "enabled": true, "weight": 2}
+  ]
+}
+```
+
+`accounts` is optional. If empty, legacy single-account fields (`cookie_file`, `auth_user`, `xsrf_token`) are still supported.
 
 When `api_keys` is `[]`, authentication is disabled. When one or more keys are set, `/v1/*` endpoints require `Authorization: Bearer <key>` or `x-api-key: <key>`.
 

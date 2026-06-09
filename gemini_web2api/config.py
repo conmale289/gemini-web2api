@@ -6,6 +6,7 @@ DEFAULT_CONFIG = {
     "port": 8081,
     "host": "0.0.0.0",
     "retry_attempts": 3,
+    "max_account_retry_attempts": 12,
     "retry_delay_sec": 2,
     "request_timeout_sec": 180,
     "gemini_bl": "boq_assistant-bard-web-server_20260525.09_p0",
@@ -14,6 +15,7 @@ DEFAULT_CONFIG = {
     "default_model": "gemini-3.5-flash",
     "log_requests": True,
     "cookie_file": None,
+    "accounts": [],
     "proxy": None,
     "api_keys": [],
 }
