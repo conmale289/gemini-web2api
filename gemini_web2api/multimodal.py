@@ -6,6 +6,7 @@ import urllib.parse
 import time
 import ssl
 import re
+import threading
 
 from .config import CONFIG
 from .gemini import load_cookie, make_sapisidhash, _get_ssl_ctx, log
@@ -46,17 +47,19 @@ def _get_page_tokens(account: dict = None) -> dict:
 
 
 _page_tokens_cache = {}
+_page_tokens_lock = threading.Lock()
 
 
 def _cached_page_tokens(account: dict = None) -> dict:
     account = account or {}
     account_id = account.get("id", "legacy")
     now = time.time()
-    cache = _page_tokens_cache.setdefault(account_id, {"tokens": {}, "ts": 0})
-    if now - cache["ts"] > 600:
-        cache["tokens"] = _get_page_tokens(account)
-        cache["ts"] = now
-    return cache["tokens"]
+    with _page_tokens_lock:
+        cache = _page_tokens_cache.setdefault(account_id, {"tokens": {}, "ts": 0})
+        if now - cache["ts"] > 600:
+            cache["tokens"] = _get_page_tokens(account)
+            cache["ts"] = now
+        return cache["tokens"]
 
 
 def upload_image(image_bytes: bytes, filename: str = "image.png", mime_type: str = "image/png",

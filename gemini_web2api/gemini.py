@@ -159,7 +159,11 @@ def _account_attempts(forced_account: dict = None) -> int:
     base = max(1, int(CONFIG["retry_attempts"]))
     if forced_account:
         return base
-    return base * max(1, ACCOUNT_POOL.enabled_account_count())
+    attempts = base * max(1, ACCOUNT_POOL.enabled_account_count())
+    cap = CONFIG.get("max_account_retry_attempts")
+    if isinstance(cap, int) and cap > 0:
+        attempts = min(attempts, cap)
+    return max(base, attempts)
 
 
 def clean_text(text: str) -> str:
@@ -233,10 +237,10 @@ def generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None
         except Exception as e:
             last_err = e
             if _is_account_error(e):
-                backoff = ACCOUNT_POOL.report_failure(account_ctx)
+                account_backoff_sec = ACCOUNT_POOL.report_failure(account_ctx)
                 if attempt < max_attempts - 1:
                     log(f"Account rotate {attempt+1}/{max_attempts}: account={mask_account_id(account_ctx.get('id'))} "
-                        f"backoff={backoff}s reason={e}")
+                        f"backoff={account_backoff_sec}s reason={e}")
             elif attempt < max_attempts - 1:
                 log(f"Retry {attempt+1}/{max_attempts}: {e}")
                 time.sleep(CONFIG["retry_delay_sec"])
@@ -281,10 +285,10 @@ def generate_stream(prompt: str, model_id: int, think_mode: int, file_refs: list
         except Exception as e:
             last_err = e
             if _is_account_error(e):
-                backoff = ACCOUNT_POOL.report_failure(account_ctx)
+                account_backoff_sec = ACCOUNT_POOL.report_failure(account_ctx)
                 if attempt < max_attempts - 1:
                     log(f"Stream rotate {attempt+1}/{max_attempts}: account={mask_account_id(account_ctx.get('id'))} "
-                        f"backoff={backoff}s reason={e}")
+                        f"backoff={account_backoff_sec}s reason={e}")
             elif attempt < max_attempts - 1:
                 log(f"Stream retry {attempt+1}/{max_attempts}: {e}")
                 time.sleep(CONFIG["retry_delay_sec"])

@@ -1,5 +1,6 @@
 """Account pool for multi-cookie round-robin routing."""
 import json
+import logging
 import os
 import threading
 import time
@@ -127,6 +128,7 @@ class AccountPool:
                         eligible.append(acct)
             candidates = eligible or fallback
             if not candidates:
+                logging.warning("Account pool has no eligible accounts; falling back to anonymous mode")
                 return {"id": "anonymous", "cookie": "", "sapisid": None, "auth_user": None, "xsrf_token": None}
             account = candidates[self._rr_index % len(candidates)]
             self._rr_index += 1

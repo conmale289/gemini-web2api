@@ -155,6 +155,7 @@ Pro 路由需要 **Gemini Advanced** (付费订阅). 免费 Google 账号的 coo
   "port": 8081,
   "host": "0.0.0.0",
   "retry_attempts": 3,
+  "max_account_retry_attempts": 12,
   "retry_delay_sec": 2,
   "request_timeout_sec": 180,
   "gemini_bl": "boq_assistant-bard-web-server_20260525.09_p0",
