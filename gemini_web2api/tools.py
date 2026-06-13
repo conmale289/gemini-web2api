@@ -5,6 +5,8 @@ import uuid
 import base64
 import io
 
+from .compress import compress_messages, compact_tool_json, strip_noise
+
 MAX_IMAGE_B64_SIZE = 50000  # ~37KB raw image
 
 
@@ -55,7 +57,11 @@ def messages_to_prompt(messages: list, tools: list = None, tool_choice=None) -> 
     """Convert OpenAI messages to (prompt_str, images_list).
 
     Returns (prompt, images) where images is a list of (bytes, mime_type) tuples.
+    Applies RTK-inspired compression: filtering, dedup, truncation, compact encoding.
     """
+    # Apply compression pipeline
+    messages, tools = compress_messages(messages, tools)
+
     parts = []
     images = []
 
@@ -71,11 +77,9 @@ def messages_to_prompt(messages: list, tools: list = None, tool_choice=None) -> 
         if tool_defs:
             constraint = _build_tool_choice_instruction(tool_choice, tool_defs)
             parts.append(
-                "# Tool Use\n\n"
-                "You can call the following tools. Call format:\n"
-                '```tool_call\n{"name": "func_name", "arguments": {...}}\n```\n'
-                "When calling tools, output ONLY the tool_call block(s).\n\n"
-                f"Available tools:\n{json.dumps(tool_defs, indent=2)}"
+                "# Tools\n"
+                'Call format: ```tool_call\n{"name":"func","arguments":{...}}\n```\n'
+                f"Available:\n{compact_tool_json(tool_defs)}"
                 f"{constraint}"
             )
 
@@ -88,28 +92,25 @@ def messages_to_prompt(messages: list, tools: list = None, tool_choice=None) -> 
             for c in content:
                 if c.get("type") in ("text", "input_text"):
                     text_parts.append(c.get("text", ""))
-                elif c.get("type") == "image_url":
-                    text_parts.append("[Note: Image input not supported in this API. Please describe the image in text.]")
-                elif c.get("type") == "image":
-                    text_parts.append("[Note: Image input not supported in this API. Please describe the image in text.]")
+                elif c.get("type") in ("image_url", "image"):
+                    text_parts.append("[Image not supported, describe in text]")
             content = " ".join(text_parts)
 
         if role == "system":
-            parts.append(f"[System instruction]: {content}")
+            parts.append(f"[S]: {content}")
         elif role == "assistant":
             if msg.get("tool_calls"):
                 tc_strs = []
                 for tc in msg["tool_calls"]:
                     fn = tc.get("function", {})
                     tc_strs.append(
-                        f'```tool_call\n{{"name": "{fn.get("name")}", '
-                        f'"arguments": {fn.get("arguments", "{}")}}}\n```'
+                        f'```tool_call\n{{"name":"{fn.get("name")}","arguments":{fn.get("arguments", "{}")}}}\n```'
                     )
-                parts.append(f"[Assistant]: {content or ''}\n" + "\n".join(tc_strs))
+                parts.append(f"[A]: {content or ''}\n" + "\n".join(tc_strs))
             else:
-                parts.append(f"[Assistant]: {content}")
+                parts.append(f"[A]: {content}")
         elif role == "tool":
-            parts.append(f"[Tool result for {msg.get('name', '')}]: {content}")
+            parts.append(f"[T:{msg.get('name', '')}]: {content}")
         else:
             parts.append(content if content else "")
 

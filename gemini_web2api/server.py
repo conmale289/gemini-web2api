@@ -47,6 +47,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
 
     def send_json(self, data, status=200):
         body = json.dumps(data, ensure_ascii=False).encode()
+        log(f"RESPONSE {self.path} [{status}]: {body[:2048].decode(errors='replace')}", level="DEBUG")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -87,18 +88,30 @@ class GeminiHandler(BaseHTTPRequestHandler):
             if self.path.startswith("/v1/") and not self._authorized():
                 self.send_json({"error": {"message": "invalid api key"}}, 401)
                 return
-            if self.path == "/v1/models":
-                self.send_json({"object": "list", "data": [
-                    {"id": n, "object": "model", "created": 1700000000,
-                     "owned_by": "google", "description": c["desc"]}
-                    for n, c in MODELS.items()
-                ]})
+            models_list = [
+                {"id": n, "object": "model", "created": 1700000000,
+                 "owned_by": "google", "description": c["desc"]}
+                for n, c in MODELS.items()
+            ]
+            if self.path == "/v1/models" or self.path == "/api/v1/models":
+                self.send_json({"object": "list", "data": models_list})
+            elif self.path.startswith("/v1/models/"):
+                mid = self.path[len("/v1/models/"):]
+                entry = next((m for m in models_list if m["id"] == mid), None)
+                if entry:
+                    self.send_json(entry)
+                else:
+                    self.send_json({"error": {"message": f"model '{mid}' not found", "type": "invalid_request_error"}}, 404)
             elif self.path.startswith("/v1beta/models"):
                 self.send_json({"models": [
                     {"name": f"models/{n}", "displayName": n, "description": c["desc"],
                      "supportedGenerationMethods": ["generateContent", "streamGenerateContent"]}
                     for n, c in MODELS.items()
                 ]})
+            elif self.path in ("/version", "/v1/props", "/props"):
+                self.send_json({"version": __version__})
+            elif self.path == "/api/tags":
+                self.send_json({"models": [{"name": n, "model": n} for n in MODELS]})
             elif self.path == "/":
                 self.send_json({"status": "ok", "version": __version__, "models": list(MODELS.keys())})
             else:
@@ -113,10 +126,18 @@ class GeminiHandler(BaseHTTPRequestHandler):
                 return
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length) if length else b""
+            log(f"REQUEST {self.path}: {body[:2048].decode(errors='replace')}", level="DEBUG")
             if self.path == "/v1/chat/completions":
                 self._handle_chat(body)
             elif self.path == "/v1/responses":
                 self._handle_responses(body)
+            elif self.path == "/api/show":
+                req = self._parse_body(body) or {}
+                name = req.get("name", req.get("model", ""))
+                if name in MODELS:
+                    self.send_json({"modelfile": "", "parameters": "", "template": "", "details": {"family": "gemini", "format": "gguf"}})
+                else:
+                    self.send_json({"error": f"model '{name}' not found"}, 404)
             elif ":generateContent" in self.path:
                 self._handle_google_generate(body, stream=False)
             elif ":streamGenerateContent" in self.path:
@@ -154,17 +175,25 @@ class GeminiHandler(BaseHTTPRequestHandler):
 
         stream = req.get("stream", False)
         cid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        log(f"Chat request: model={model_name} stream={stream} has_tools={bool(tools)} tool_choice={tool_choice} prompt_len={len(prompt)}", level="DEBUG")
 
         account = next_account() if images else None
         file_refs = _upload_images(images, account)
         if stream and (not tools or tool_choice == "none"):
             try:
                 self._start_sse()
+                has_content = False
                 for delta in generate_stream(prompt, model_id, think_mode, file_refs, extra_fields, account=account):
+                    has_content = True
                     chunk = {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
                              "model": model_name, "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}]}
                     self.wfile.write(f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode())
                     self.wfile.flush()
+                if not has_content:
+                    log("Streaming returned empty content, sending error chunk", level="WARNING")
+                    err_chunk = {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
+                                 "model": model_name, "choices": [{"index": 0, "delta": {"content": "[gemini-web2api: upstream returned empty response. Cookie may be expired or rate-limited.]"}, "finish_reason": None}]}
+                    self.wfile.write(f"data: {json.dumps(err_chunk, ensure_ascii=False)}\n\n".encode())
                 end = {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
                        "model": model_name, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
                 self.wfile.write(f"data: {json.dumps(end)}\n\n".encode())
@@ -180,6 +209,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
             self.send_json({"error": {"message": f"upstream error: {e}"}}, 502)
             return
 
+        log(f"Chat generate result: model={model_name} text_len={len(text or '')} has_text={bool(text)}", level="DEBUG")
         tool_calls = None
         if tools and text and tool_choice != "none":
             text, tool_calls = parse_tool_calls(text)

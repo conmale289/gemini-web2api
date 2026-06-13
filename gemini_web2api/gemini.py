@@ -145,7 +145,7 @@ def _is_account_error(err: Exception) -> bool:
     if HAS_HTTPX and isinstance(err, httpx.HTTPStatusError):
         return err.response.status_code in (400, 401, 403, 429)
     msg = str(err).lower()
-    return any(k in msg for k in ("xsrf", "auth", "unauthorized", "forbidden", "rate limit", "quota", "429"))
+    return any(k in msg for k in ("xsrf", "auth", "unauthorized", "forbidden", "rate limit", "quota", "429", "account_error"))
 
 
 def _account_attempts(forced_account: dict = None) -> int:
@@ -169,6 +169,51 @@ def clean_text(text: str) -> str:
     )
     text = re.sub(r'http://googleusercontent\.com/card_content/\d+\n?', '', text)
     return text.strip()
+
+
+# Known BardErrorInfo codes
+BARD_ERROR_CODES = {
+    1076: "handshake_timeout",
+    1099: "session_conflict",
+    1152: "prompt_too_long",
+}
+# Errors that are deterministic — retrying won't help
+BARD_FATAL_ERRORS = {1152}
+# Errors that indicate account/session issue — trigger account rotation
+BARD_ACCOUNT_ERRORS = {1099, 1076}
+
+MAX_PROMPT_CHARS = 80000  # Gemini Web empirical limit for structured prompts
+
+
+class BardFatalError(RuntimeError):
+    """Non-retryable Gemini error."""
+    pass
+
+
+def _check_bard_error(raw: str) -> tuple:
+    """Check for BardErrorInfo in response. Returns (error_code, error_name) or (None, None)."""
+    m = re.search(r'BardErrorInfo",\[(\d+)\]', raw)
+    if m:
+        code = int(m.group(1))
+        return code, BARD_ERROR_CODES.get(code, f"unknown_error_{code}")
+    return None, None
+
+
+def truncate_prompt(prompt: str, max_chars: int = MAX_PROMPT_CHARS) -> str:
+    """Truncate prompt to fit within Gemini Web's input limit.
+
+    Strategy: Keep start (system/tools context) and end (recent conversation)
+    since LLMs attend most to beginning and end of context.
+    """
+    if len(prompt) <= max_chars:
+        return prompt
+    log(f"Truncating prompt from {len(prompt)} to {max_chars} chars", level="WARNING")
+    # 30% start (system prompt + tools), 70% end (recent messages)
+    keep_start = max_chars * 3 // 10
+    keep_end = max_chars * 7 // 10 - 80
+    return (prompt[:keep_start]
+            + "\n\n[...middle context truncated to fit model limit...]\n\n"
+            + prompt[-keep_end:])
 
 
 def _extract_texts_from_line(line: str) -> list:
@@ -207,6 +252,7 @@ def extract_response_text(raw: str) -> str:
 def generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None, extra_fields: dict = None,
              account: dict = None) -> str:
     """Non-streaming generation with retry."""
+    prompt = truncate_prompt(prompt)
     ctx = _get_ssl_ctx()
     proxy = CONFIG.get("proxy")
 
@@ -228,8 +274,26 @@ def generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None
             else:
                 resp = urllib.request.urlopen(req, context=ctx, timeout=CONFIG["request_timeout_sec"])
             raw = resp.read().decode("utf-8", errors="replace")
+            log(f"Gemini raw response length={len(raw)} first_500={raw[:500]}", level="DEBUG")
+
+            # Check for Bard-specific errors
+            err_code, err_name = _check_bard_error(raw)
+            if err_code:
+                log(f"Gemini BardError: code={err_code} name={err_name}", level="ERROR")
+                if err_code in BARD_FATAL_ERRORS:
+                    raise BardFatalError(f"Gemini error {err_code}: {err_name} (prompt_len={len(prompt)})")
+                if err_code in BARD_ACCOUNT_ERRORS:
+                    # Session conflicts need longer cooldown before retry
+                    raise RuntimeError(f"Gemini error {err_code}: {err_name} [account_error]")
+                raise RuntimeError(f"Gemini error {err_code}: {err_name}")
+
+            text = extract_response_text(raw)
+            if not text:
+                log(f"Empty extracted text from Gemini. Raw length={len(raw)}", level="WARNING")
             ACCOUNT_POOL.report_success(account_ctx)
-            return extract_response_text(raw)
+            return text
+        except BardFatalError:
+            raise
         except Exception as e:
             last_err = e
             if _is_account_error(e):
@@ -246,6 +310,7 @@ def generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None
 def generate_stream(prompt: str, model_id: int, think_mode: int, file_refs: list = None, extra_fields: dict = None,
                     account: dict = None):
     """Streaming generation via httpx with retry on connection failure."""
+    prompt = truncate_prompt(prompt)
     if not HAS_HTTPX:
         text = generate(prompt, model_id, think_mode, file_refs, extra_fields, account=account)
         if text:
@@ -263,6 +328,8 @@ def generate_stream(prompt: str, model_id: int, think_mode: int, file_refs: list
         headers = _build_headers(account_ctx)
         try:
             prev_text = ""
+            yielded = False
+            all_lines = ""
             with client.stream("POST", url, content=body, headers=headers) as resp:
                 resp.raise_for_status()
                 buf = ""
@@ -270,14 +337,27 @@ def generate_stream(prompt: str, model_id: int, think_mode: int, file_refs: list
                     buf += chunk
                     while "\n" in buf:
                         line, buf = buf.split("\n", 1)
+                        all_lines += line + "\n"
                         for t in _extract_texts_from_line(line):
                             if len(t) > len(prev_text):
                                 delta = clean_text(t[len(prev_text):])
                                 if delta:
                                     yield delta
+                                    yielded = True
                                 prev_text = t
+            if not yielded:
+                full_response = all_lines + buf
+                log(f"Stream produced no text. response_len={len(full_response)}", level="WARNING")
+                err_code, err_name = _check_bard_error(full_response)
+                if err_code:
+                    log(f"Stream BardError: code={err_code} name={err_name}", level="ERROR")
+                    if err_code in BARD_FATAL_ERRORS:
+                        raise BardFatalError(f"Gemini error {err_code}: {err_name} (prompt_len={len(prompt)})")
+                    raise RuntimeError(f"Gemini error {err_code}: {err_name}")
             ACCOUNT_POOL.report_success(account_ctx)
             return
+        except BardFatalError:
+            raise
         except Exception as e:
             last_err = e
             if _is_account_error(e):
